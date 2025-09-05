@@ -3,3 +3,4 @@
 ~~reset settings~~
 ~~reset app~~
 ~~status with color and text~~
+fix reset dialogs

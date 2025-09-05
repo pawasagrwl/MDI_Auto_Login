@@ -24,6 +24,36 @@ from net import (connected_to_target, online_now, portal_intercept_present,
 
 log = logging.getLogger("mdi.ui")
 
+# --- Ensure file logging is present and consistent ---
+# Attach a RotatingFileHandler to both the ui logger and the root logger
+# so logs from other modules (config/net/worker threads) end up in the same file.
+try:
+    from logging.handlers import RotatingFileHandler
+    # Only add handlers once (avoid duplicate handlers on reload)
+    if not any(isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", None) == str(LOG_PATH) for h in logging.getLogger().handlers):
+        fh = RotatingFileHandler(LOG_PATH, maxBytes=512*1024, backupCount=3, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        fh.setLevel(logging.INFO)
+
+        # attach to root logger so all module logs go to same file
+        root = logging.getLogger()
+        root.addHandler(fh)
+        root.setLevel(logging.INFO)
+
+        # also attach to local 'log' to make sure UI logs appear immediately via .info/.exception
+        log.addHandler(fh)
+        log.setLevel(logging.INFO)
+
+    # Also add a console handler if none exists (useful while testing)
+    if not any(isinstance(h, logging.StreamHandler) for h in logging.getLogger().handlers):
+        sh = logging.StreamHandler()
+        sh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logging.getLogger().addHandler(sh)
+except Exception:
+    # If logging setup fails, continue silently but print minimal info to stdout
+    print("Warning: failed to initialise file logging for ui (check LOG_PATH).")
+
+
 # native message boxes (thread-safe wins32)
 MB_OK = 0
 MB_ICONINFO = 0x40
