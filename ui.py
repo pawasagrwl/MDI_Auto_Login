@@ -12,6 +12,8 @@ from tkinter import ttk
 from PIL import Image, ImageDraw
 import pystray
 import logging
+import keyring
+import shutil
 
 # Import helpers from your project
 from config import (APP_NAME, DEFAULT_SSID, LOG_PATH,
@@ -153,14 +155,25 @@ class SettingsWindow:
         self.ent_url.insert(0, cfg.get("login_url", "https://172.16.16.16/24online/servlet/E24onlineHTTPClient"))
         self.ent_url.grid(row=3, column=1, sticky="we", pady=(8,0))
 
+        # Theme toggle button
+        
         self.btn_theme = ttk.Button(frm, text=("Light mode" if cfg.get("dark_mode", False) else "Dark mode"),
                                     command=self._toggle_theme)
         self.btn_theme.grid(row=4, column=0, columnspan=2, pady=(12,0))
 
-        btns = ttk.Frame(frm); btns.grid(row=5, column=0, columnspan=2, pady=12)
+        # Auto-start toggle: whether worker should start automatically on app launch
+        self.auto_start_var = tk.BooleanVar(value=cfg.get("auto_start_on_launch", True))
+        chk_autostart = ttk.Checkbutton(frm,
+                                        text="Start auto-login when app launches",
+                                        variable=self.auto_start_var)
+        chk_autostart.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8,0))
+
+        # Save / Cancel buttons (moved one row down)
+        btns = ttk.Frame(frm); btns.grid(row=6, column=0, columnspan=2, pady=12)
         ttk.Button(btns, text="Save", command=self.on_save).pack(side="left", padx=(0,8))
         ttk.Button(btns, text="Cancel", command=self.on_cancel).pack(side="left")
         frm.columnconfigure(1, weight=1)
+
 
     def _toggle_theme(self):
         cfg = load_config()
@@ -183,8 +196,11 @@ class SettingsWindow:
             return
         cfg = load_config()
         cfg.update({"ssid": ssid, "username": user, "login_url": url, "first_run": False})
+        # persist the auto-start preference from the checkbox
+        cfg["auto_start_on_launch"] = bool(self.auto_start_var.get())
         save_config(cfg)
         set_password(user, pwd)
+
         log.info("💾 Settings saved.")
         try: self.root.destroy()
         except Exception: pass
@@ -213,12 +229,16 @@ class ControlPanel:
         top = ttk.Frame(self.root, padding=(12,10,12,6)); top.pack(fill="x")
         left = ttk.Frame(top); left.pack(side="left", fill="x", expand=True)
 
-        self.status_canvas = tk.Canvas(left, width=16, height=16, highlightthickness=0, bd=0, bg=ui_bg(self.root))
-        self.status_canvas.pack(side="left", padx=(0,8))
-        self._status_dot = self.status_canvas.create_oval(2,2,14,14, fill="#999", outline="")
+        # status pill: readable text with colored background
+        self.status_label = tk.Label(left,
+                                    text=self._status_text(),
+                                    font=("Segoe UI", 9),
+                                    padx=10, pady=4,
+                                    bd=0, relief="flat",
+                                    anchor="w", justify="left")
+        # initial neutral background; will be updated by _refresh_status
+        self.status_label.pack(side="left", padx=(0,8))
 
-        self.lbl_status = ttk.Label(left, text=self._status_text(), anchor="w", justify="left")
-        self.lbl_status.pack(side="left")
 
         # Quit in top-right
         ttk.Button(top, text="Quit", command=self._quit_app).pack(side="right")
@@ -235,7 +255,15 @@ class ControlPanel:
         self.btn_startup.pack(side="left", padx=(0,8))
         ttk.Button(util, text="Open log", command=self._open_log).pack(side="left", padx=(0,8))
         self.btn_theme = ttk.Button(util, text=self._theme_text(), command=self._toggle_theme)
-        self.btn_theme.pack(side="left")
+        self.btn_theme.pack(side="left", padx=(0,8))
+
+        # small reset buttons group
+        resets = ttk.Frame(row)
+        resets.pack(side="right")
+        ttk.Button(resets, text="Reset log", command=self.tray_app.reset_log_file).pack(side="left", padx=(0,6))
+        ttk.Button(resets, text="Reset settings", command=self.tray_app.reset_settings).pack(side="left", padx=(0,6))
+        ttk.Button(resets, text="Reset app", command=self.tray_app.reset_app).pack(side="left")
+
 
         # Log viewer
         mid = ttk.Frame(self.root, padding=(12,4,12,12)); mid.pack(fill="both", expand=True)
@@ -268,11 +296,22 @@ class ControlPanel:
     def _theme_text(self):
         return "Light mode" if self.cfg.get("dark_mode", False) else "Dark mode"
 
-    def _set_status_color(self, color: str):
+    def _set_status_color(self, color: str, text: str = None):
+        """Set the status pill background color and optional text."""
         try:
-            self.status_canvas.itemconfigure(self._status_dot, fill=color)
+            bg = color or ui_bg(self.root)
+            # choose readable foreground
+            fg = "#ffffff"
+            # amber/neutral: use dark text
+            if bg.lower() in ("#ffa000", "#999999", "systembuttonface"):
+                fg = "#000000"
+            # apply
+            self.status_label.configure(bg=bg, fg=fg)
+            if text is not None:
+                self.status_label.configure(text=text)
         except Exception:
             pass
+
 
     # actions
     def _toggle_autologin(self):
@@ -310,10 +349,11 @@ class ControlPanel:
         # update text widget colors to match theme
         if self.cfg.get("dark_mode", False):
             self.txt.configure(bg="#0f0f0f", fg="#eaeaea", insertbackground="#eaeaea")
-            self.status_canvas.configure(bg="#121212")
+            self.status_label.configure(bg="#121212", fg="#ffffff")
+
         else:
             self.txt.configure(bg="white", fg="#111111", insertbackground="black")
-            self.status_canvas.configure(bg=ui_bg(self.root))
+            self.status_label.configure(bg=ui_bg(self.root), fg="#000000")
 
     def _toggle_startup(self):
         exe = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(sys.argv[0])
@@ -333,10 +373,11 @@ class ControlPanel:
         # update text widget & canvas colors
         if self.cfg["dark_mode"]:
             self.txt.configure(bg="#0f0f0f", fg="#eaeaea", insertbackground="#eaeaea")
-            self.status_canvas.configure(bg="#121212")
+            self.status_label.configure(bg="#121212", fg="#ffffff")
+
         else:
             self.txt.configure(bg="white", fg="#111111", insertbackground="black")
-            self.status_canvas.configure(bg=ui_bg(self.root))
+            self.status_label.configure(bg=ui_bg(self.root), fg="#000000")
         self.btn_theme.config(text=self._theme_text())
 
     def _quit_app(self):
@@ -348,14 +389,29 @@ class ControlPanel:
         except Exception: pass
 
     def _refresh_status(self):
-        color = "#28a745" if online_now() else ("#FFA000" if portal_intercept_present() or connected_to_target(self.cfg) else "#999999")
-        self._set_status_color(color)
+        # build state text
+        online = online_now()
+        captive = portal_intercept_present() or connected_to_target(self.cfg)
+        if online:
+            color = "#28a745"
+            status_extra = "Online"
+        elif captive:
+            color = "#FFA000"
+            status_extra = "Captive portal"
+        else:
+            color = "#999999"
+            status_extra = "Not connected"
+
+        status_text = f"{self._status_text()}   |   {status_extra}"
+        self._set_status_color(color, status_text)
+
+        # update other controls text
         try:
-            self.lbl_status.config(text=self._status_text())
             self.btn_toggle.config(text=self._toggle_text())
             self.btn_startup.config(text=self._startup_text())
         except Exception:
             pass
+
 
     def _refresh_log(self):
         try:
@@ -411,8 +467,12 @@ class TrayApp:
             pystray.MenuItem("Manual login now", self.manual_login),
             pystray.MenuItem("Settings…", self.open_settings),
             pystray.MenuItem("Open log", self.open_log),
+            pystray.MenuItem("Reset log", lambda _: self.reset_log_file()),
+            pystray.MenuItem("Reset settings", lambda _: self.reset_settings()),
+            pystray.MenuItem("Reset app", lambda _: self.reset_app()),
             pystray.MenuItem("Quit", self.quit)
         )
+
 
     def _build_icon(self):
         img = Image.new("RGBA", (24, 24), (0,0,0,0))
@@ -484,6 +544,72 @@ class TrayApp:
             webbrowser.open(LOG_PATH.as_uri())
         except Exception:
             os.startfile(str(LOG_PATH))
+            
+        # ---------- Reset helpers ----------
+    def _confirm(self, title: str, text: str) -> bool:
+        return ask_yes_no(title, text)
+
+    def reset_log_file(self):
+        if not self._confirm(APP_NAME, "Clear the log file?"):
+            return
+        try:
+            LOG_PATH.write_text("", encoding="utf-8")
+            log.info("🗑️ Log file cleared.")
+            msg_info(APP_NAME, "Log file cleared.")
+        except Exception as e:
+            log.exception("Failed to clear log")
+            msg_error(APP_NAME, f"Could not clear log: {e}")
+
+    def reset_settings(self):
+        if not self._confirm(APP_NAME, "Reset settings to defaults? This will remove saved username and settings."):
+            return
+        try:
+            # remove config file
+            try:
+                if CONFIG_PATH.exists(): CONFIG_PATH.unlink()
+            except Exception:
+                pass
+            # remove stored password for current username (best-effort)
+            try:
+                cfg = load_config()
+                if cfg.get("username"):
+                    keyring.delete_password(SERVICE_NAME, cfg.get("username"))
+            except Exception:
+                pass
+            # write default config back
+            save_config(load_config())
+            log.info("⚙️ Settings reset to defaults.")
+            msg_info(APP_NAME, "Settings reset to defaults.")
+        except Exception as e:
+            log.exception("Failed to reset settings")
+            msg_error(APP_NAME, f"Could not reset settings: {e}")
+
+    def reset_app(self):
+        if not self._confirm(APP_NAME, "Reset app (clear settings, log, and stored credentials)?"):
+            return
+        try:
+            # stop worker first
+            self.stop_worker()
+            # remove config & log
+            try:
+                if CONFIG_PATH.exists(): CONFIG_PATH.unlink()
+                if LOG_PATH.exists(): LOG_PATH.unlink()
+            except Exception:
+                pass
+            # try delete keyring entry for username
+            try:
+                cfg = load_config()
+                if cfg.get("username"):
+                    keyring.delete_password(SERVICE_NAME, cfg.get("username"))
+            except Exception:
+                pass
+            # recreate defaults
+            save_config(load_config())
+            log.info("🔄 App reset performed.")
+            msg_info(APP_NAME, "App reset complete. Restart the app to apply changes.")
+        except Exception as e:
+            log.exception("Failed to reset app")
+            msg_error(APP_NAME, f"Could not reset app: {e}")
 
     def quit(self, _=None):
         # stop worker and icon
@@ -497,6 +623,8 @@ class TrayApp:
             try: self.tk_root.quit()
             except Exception: pass
         self.tk_root.after(0, _stop_tk)
+    
+    
 
     def run(self):
         """Start the tray icon in a background thread, keep the Tk root mainloop running."""
@@ -516,6 +644,14 @@ class TrayApp:
         # run the tray icon in a separate thread (pystray will create its own message loop)
         t = threading.Thread(target=self.icon.run, daemon=True)
         t.start()
+        
+        try:
+            cfg = load_config()
+            if cfg.get("auto_start_on_launch", True):
+                self.start_worker()
+        except Exception:
+            # don't crash startup if config read fails
+            log.exception("Failed to start auto-login at launch.")
 
 # ---------- Entrypoint helper ----------
 def run_app():

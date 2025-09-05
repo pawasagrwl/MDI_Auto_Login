@@ -35,6 +35,7 @@ def load_config():
         "settle_max": 8,
         "settle_step": 0.5,
         "first_run": True,
+        "auto_start_on_launch": True, 
         "dark_mode": False,
     }
 
